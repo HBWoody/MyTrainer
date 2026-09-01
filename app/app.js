@@ -348,6 +348,13 @@
       ? '<div class="thumb has-video" data-playvideo="' + esc(vid) + '">' + exIconInner(e) + "</div>"
       : '<div class="thumb">' + exIconInner(e) + "</div>";
   }
+  // Icon-box preview (Edit Exercise): image only — no ▶ overlay (which only positions inside .thumb).
+  function iconPreviewInner(e) {
+    if (e && e.icon) return '<img class="exicon" src="' + e.icon + '" alt="">';
+    var v = e && e.videoUrl ? videoInfo(e.videoUrl) : null;
+    if (v && v.thumb) return '<img class="exicon" src="' + esc(v.thumb) + '" alt="" onerror="this.remove()">';
+    return "🏋️";
+  }
   function exName(id) { var e = exById(id); return e ? e.name : "Exercise"; }
   function workoutById(id) { for (var i = 0; i < S.workouts.length; i++) if (S.workouts[i].id === id) return S.workouts[i]; return null; }
   function logById(id) { for (var i = 0; i < S.logs.length; i++) if (S.logs[i].id === id) return S.logs[i]; return null; }
@@ -835,7 +842,7 @@
       '<div class="muted" style="font-size:13px;margin:6px 2px 2px">📚 Exercises are shared between Adam and Char.</div>' +
       '<label class="field-label">Icon</label>' +
       '<div class="row" style="gap:14px">' +
-      '<div class="iconpreview" id="iconpreview">' + exIconInner(e) + "</div>" +
+      '<div class="iconpreview" id="iconpreview">' + iconPreviewInner(e) + "</div>" +
       '<div class="grow"><button class="btn sm soft" data-iconupload>Upload image</button>' +
       (e.icon ? ' <button class="btn sm outline" data-iconclear>Remove</button>' : "") +
       '<div class="muted" style="font-size:12px;margin-top:6px">Replaces the emoji. Square images look best.</div></div>' +
@@ -1409,7 +1416,7 @@
     }
     if (d.iconclear != null) {
       var ee2 = UI.editingExercise; ee2.obj.icon = "";
-      var pv2 = document.getElementById("iconpreview"); if (pv2) pv2.innerHTML = exIconInner(ee2.obj);
+      var pv2 = document.getElementById("iconpreview"); if (pv2) pv2.innerHTML = iconPreviewInner(ee2.obj);
       if (!ee2.isNew) saveEx();
       toast("Icon removed");
       return;
