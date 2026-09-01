@@ -1,0 +1,10 @@
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+
+# Design reference material — kept local.
+# Contains a third party's app screenshots and a person's name; not for a public repo.
+/References/
