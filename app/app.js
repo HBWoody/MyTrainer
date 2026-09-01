@@ -1169,15 +1169,37 @@
     if (withId.indexOf(head) >= 0) return { name: head, id: parts[1] };
     return { name: "home" };
   }
-  var navDepth = 0; // how many in-app forward navigations are on the history stack
-  function go(str) { navDepth++; location.hash = "#/" + str; }
-  function goReplace(str) { location.replace(location.href.split("#")[0] + "#/" + str); }
+  /* Menu stack — back walks UP this hierarchy, not the browser history.
+     Roots (bottom-nav tabs) reset the stack; drilling in pushes; returning
+     to an ancestor truncates; back pops to the parent. */
+  var ROOTS = { home: 1, plan: 1, progress: 1, weight: 1, more: 1 };
+  function routeName(str) { return (str || "home").split(":")[0]; }
+  function curRouteStr() { var h = location.hash.replace(/^#\/?/, ""); return h || "home"; }
+  function pushRoute(str) {
+    if (ROOTS[routeName(str)]) { UI.stack = [str]; return; }
+    var idx = UI.stack.indexOf(str);
+    if (idx >= 0) UI.stack = UI.stack.slice(0, idx + 1);
+    else UI.stack.push(str);
+  }
+  function go(str) {
+    var target = "#/" + str;
+    if (location.hash === target) return;
+    pushRoute(str);
+    UI._navByCode = true;
+    location.hash = target;
+  }
   function goBack(fallback) {
-    if (navDepth > 0) { navDepth--; history.back(); }
-    else go(fallback);
+    UI.stack.pop();
+    var parent = UI.stack[UI.stack.length - 1];
+    if (!parent) { parent = fallback || "home"; UI.stack = [parent]; }
+    UI._navByCode = true;
+    location.hash = "#/" + parent;
   }
   window.addEventListener("hashchange", function () {
-    UI.route = locationRoute();
+    var str = curRouteStr();
+    UI.route = parseRoute(str);
+    if (!UI._navByCode) pushRoute(str); // hash changed by the browser back/forward — resync stack
+    UI._navByCode = false;
     if (UI.route.name !== "session") stopRest();
     render();
     if (UI.route.name === "session" && UI.rest) renderRestTimer();
@@ -1573,6 +1595,7 @@
      BOOT
      ============================================================ */
   load();
+  UI.stack = [curRouteStr()];
   render();
   document.addEventListener("visibilitychange", function () { if (!document.hidden && UI.rest) updateRestTimer(); });
 })();
