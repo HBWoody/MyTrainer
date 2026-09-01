@@ -247,15 +247,37 @@
 
   /* ---------- Lookups ---------- */
   function exById(id) { for (var i = 0; i < EX.length; i++) if (EX[i].id === id) return EX[i]; return null; }
-  // Thumbnail inner HTML: uploaded icon image > video play glyph > dumbbell emoji
+  // Parse a video URL into { kind, embed, thumb } for thumbnails + in-app playback.
+  function videoInfo(url) {
+    if (!url) return null;
+    url = String(url).trim();
+    var yt = url.match(/(?:youtube\.com\/(?:watch\?v=|embed\/|shorts\/|v\/)|youtu\.be\/)([\w-]{6,})/);
+    if (yt) return { kind: "youtube", embed: "https://www.youtube.com/embed/" + yt[1] + "?autoplay=1&playsinline=1&rel=0", thumb: "https://img.youtube.com/vi/" + yt[1] + "/hqdefault.jpg" };
+    var vm = url.match(/vimeo\.com\/(?:video\/)?(\d+)/);
+    if (vm) return { kind: "vimeo", embed: "https://player.vimeo.com/video/" + vm[1] + "?autoplay=1", thumb: null };
+    if (/\.(mp4|webm|ogg|ogv|mov|m4v)(\?|#|$)/i.test(url)) return { kind: "file", embed: url, thumb: null };
+    return { kind: "other", embed: url, thumb: null };
+  }
+  // Thumbnail inner HTML: uploaded icon > video thumbnail (with play) > video play glyph > dumbbell
   function exIconInner(e) {
     if (e && e.icon) return '<img class="exicon" src="' + e.icon + '" alt="">';
-    if (e && e.videoUrl) return '<span class="play">▶</span>';
+    var v = e && e.videoUrl ? videoInfo(e.videoUrl) : null;
+    if (v && v.thumb) return '<img class="exicon" src="' + esc(v.thumb) + '" alt="" onerror="this.remove()"><span class="play">▶</span>';
+    if (v) return '<span class="play">▶</span>';
     return "🏋️";
   }
   function exLeadInner(e) {
     if (e && e.icon) return '<img class="exicon" src="' + e.icon + '" alt="">';
+    var v = e && e.videoUrl ? videoInfo(e.videoUrl) : null;
+    if (v && v.thumb) return '<img class="exicon" src="' + esc(v.thumb) + '" alt="" onerror="this.remove()">';
     return "🏋️";
+  }
+  // Full thumb element (with click-to-play when there's a video).
+  function thumbTag(e) {
+    var vid = e && e.videoUrl ? e.videoUrl : "";
+    return vid
+      ? '<div class="thumb has-video" data-playvideo="' + esc(vid) + '">' + exIconInner(e) + "</div>"
+      : '<div class="thumb">' + exIconInner(e) + "</div>";
   }
   function exName(id) { var e = exById(id); return e ? e.name : "Exercise"; }
   function workoutById(id) { for (var i = 0; i < S.workouts.length; i++) if (S.workouts[i].id === id) return S.workouts[i]; return null; }
@@ -671,7 +693,7 @@
       var e = exById(it.exerciseId);
       itemsHtml += '<div class="card exq" data-itemid="' + it.id + '"><div class="head">' +
         '<button class="draghandle" data-drag title="Drag to reorder">⋮⋮</button>' +
-        '<div class="thumb">' + exIconInner(e) + "</div>" +
+        thumbTag(e) +
         '<div class="grow"><div class="name">' + esc(e ? e.name : "Exercise") + "</div>" +
         '<div class="pills">' +
         '<span class="pill">Sets: ' + it.sets + "</span>" +
@@ -987,7 +1009,7 @@
       var liveIcon = (eLive && eLive.icon) ? eLive.icon : (it.icon || "");
       var liveVid = (eLive && eLive.videoUrl) ? eLive.videoUrl : (it.videoUrl || "");
       html += '<div class="card exq' + (exdone ? " exdone" : "") + '"><div class="head">' +
-        '<div class="thumb">' + (liveIcon ? '<img class="exicon" src="' + liveIcon + '" alt="">' : (liveVid ? '<a href="' + esc(liveVid) + '" target="_blank" rel="noopener"><span class="play">▶</span></a>' : "🏋️")) + "</div>" +
+        thumbTag({ icon: liveIcon, videoUrl: liveVid }) +
         '<div class="grow"><div class="name">' + esc(it.name) + '<span class="exdone-tick">' + (exdone ? " ✓" : "") + "</span></div>" +
         '<div class="pills"><span class="pill">Reps: ' + esc(it.reps) + "</span>" +
         (it.rest > 0
@@ -1096,6 +1118,26 @@
     bd.addEventListener("click", function (e) { if (e.target === bd) closeSheet(); });
   }
   function closeSheet() { var s = document.getElementById("sheet"); if (s) s.remove(); }
+
+  /* ---------- In-app video player ---------- */
+  function openVideo(url) {
+    var v = videoInfo(url); if (!v) return;
+    closeVideo();
+    var frame = v.kind === "file"
+      ? '<video src="' + esc(v.embed) + '" controls autoplay playsinline></video>'
+      : '<iframe src="' + esc(v.embed) + '" allow="autoplay; fullscreen; encrypted-media; picture-in-picture" allowfullscreen></iframe>';
+    var bd = document.createElement("div");
+    bd.className = "videofs"; bd.id = "videofs";
+    bd.innerHTML =
+      '<div class="videofs-inner">' +
+      '<div class="videofs-bar"><button class="videofs-close" data-closevideo>✕ Close</button></div>' +
+      '<div class="videofs-frame">' + frame + "</div>" +
+      '<a class="videofs-open" href="' + esc(url) + '" target="_blank" rel="noopener">Open in browser ↗</a>' +
+      "</div>";
+    document.body.appendChild(bd);
+    bd.addEventListener("click", function (e) { if (e.target === bd) closeVideo(); });
+  }
+  function closeVideo() { var el = document.getElementById("videofs"); if (el) el.remove(); }
 
   function openExercisePicker(onPick) {
     UI._pick = onPick;
@@ -1211,13 +1253,15 @@
      ============================================================ */
   document.addEventListener("click", function (e) {
     var t = e.target;
-    var el = t.closest ? t.closest("[data-nav],[data-back],[data-open],[data-day],[data-additem],[data-itemedit],[data-itemdel],[data-savework],[data-saveex],[data-exdel],[data-delset],[data-sessdel],[data-notetoggle],[data-wsave],[data-wdel],[data-unit],[data-reset],[data-export],[data-import],[data-switch],[data-planadd],[data-plandel],[data-planweek],[data-restadd],[data-restskip],[data-restsub15],[data-restpill],[data-pick],[data-picknew],[data-idsave],[data-logdel],[data-settheme],[data-iconupload],[data-iconclear],[data-dark]") : null;
+    var el = t.closest ? t.closest("[data-nav],[data-back],[data-open],[data-day],[data-playvideo],[data-closevideo],[data-additem],[data-itemedit],[data-itemdel],[data-savework],[data-saveex],[data-exdel],[data-delset],[data-sessdel],[data-notetoggle],[data-wsave],[data-wdel],[data-unit],[data-reset],[data-export],[data-import],[data-switch],[data-planadd],[data-plandel],[data-planweek],[data-restadd],[data-restskip],[data-restsub15],[data-restpill],[data-pick],[data-picknew],[data-idsave],[data-logdel],[data-settheme],[data-iconupload],[data-iconclear],[data-dark]") : null;
     if (!el) return;
     var d = el.dataset;
 
     if (d.nav != null) { go(d.nav); return; }
     if (d.back != null) { goBack(d.back); return; }
     if (d.day != null) { UI.selectedDate = d.day; render(); return; }
+    if (d.playvideo != null) { openVideo(d.playvideo); return; }
+    if (d.closevideo != null) { closeVideo(); return; }
     if (d.open != null) { openWorkoutSession(d.open, el.dataset.date || todayKey()); return; }
 
     /* ----- workout editor ----- */
