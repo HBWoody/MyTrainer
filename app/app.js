@@ -59,8 +59,87 @@
   var SEED_VERSION = 2; // bump to refresh the starter program on existing (unused) profiles
   var UI = { route: locationRoute(), toast: null, expanded: {} }; // transient
 
-  function save() { try { localStorage.setItem(KEY, JSON.stringify(S)); return true; } catch (e) { return false; } }
-  function saveEx() { try { localStorage.setItem(SHARED_KEY, JSON.stringify(EX)); return true; } catch (e) { return false; } }
+  function save() { var ok = true; try { localStorage.setItem(KEY, JSON.stringify(S)); } catch (e) { ok = false; } Cloud.scheduleProfile(); return ok; }
+  function saveEx() { var ok = true; try { localStorage.setItem(SHARED_KEY, JSON.stringify(EX)); } catch (e) { ok = false; } Cloud.scheduleEx(); return ok; }
+
+  /* ============================================================
+     CLOUD SYNC — Firebase Realtime Database (optional).
+     Source of truth when configured; localStorage is the offline cache.
+     Enabled by filling window.MYTRAINER_FIREBASE (app/firebase-config.js).
+     ============================================================ */
+  var Cloud = {
+    ready: false, db: null, pRef: null, eRef: null,
+    lastP: null, lastE: null, pTimer: null, eTimer: null,
+    init: function () {
+      if (this.ready) return true;
+      if (!window.MYTRAINER_FIREBASE || !window.firebase || !window.firebase.database) return false;
+      try {
+        if (!firebase.apps || !firebase.apps.length) firebase.initializeApp(window.MYTRAINER_FIREBASE);
+        this.db = firebase.database();
+        this.pRef = this.db.ref("profiles/" + PROFILE);
+        this.eRef = this.db.ref("exercises");
+        this.ready = true;
+        return true;
+      } catch (e) { this.ready = false; return false; }
+    },
+    start: function () {
+      if (!this.ready) return;
+      var self = this, firstP = true, firstE = true;
+      this.eRef.on("value", function (snap) {
+        var v = snap.val();
+        if (firstE) { firstE = false; if (v != null) adoptEx(v); else self.pushEx(); return; }
+        if (v != null && JSON.stringify(v) !== self.lastE) adoptEx(v);
+      }, function () {});
+      this.pRef.on("value", function (snap) {
+        var v = snap.val();
+        if (firstP) { firstP = false; if (v != null) adoptProfile(v); else self.pushProfile(); return; }
+        if (v != null && JSON.stringify(v) !== self.lastP) adoptProfile(v);
+      }, function () {});
+    },
+    scheduleProfile: function () { if (!this.ready) return; var s = this; clearTimeout(this.pTimer); this.pTimer = setTimeout(function () { s.pushProfile(); }, 700); },
+    scheduleEx: function () { if (!this.ready) return; var s = this; clearTimeout(this.eTimer); this.eTimer = setTimeout(function () { s.pushEx(); }, 700); },
+    pushProfile: function () { if (!this.ready) return; try { this.lastP = JSON.stringify(S); this.pRef.set(JSON.parse(this.lastP)); } catch (e) {} },
+    pushEx: function () { if (!this.ready) return; try { this.lastE = JSON.stringify(EX); this.eRef.set(JSON.parse(this.lastE)); } catch (e) {} }
+  };
+  function asArray(v) { return Array.isArray(v) ? v : (v && typeof v === "object" ? Object.keys(v).map(function (k) { return v[k]; }) : []); }
+  function adoptProfile(val) {
+    Cloud.lastP = JSON.stringify(val);
+    S = val;
+    applyProfileDefaults();
+    try { localStorage.setItem(KEY, JSON.stringify(S)); } catch (e) {}
+    applyTheme();
+    safeRerender();
+  }
+  function adoptEx(val) {
+    Cloud.lastE = JSON.stringify(val);
+    EX = asArray(val);
+    try { localStorage.setItem(SHARED_KEY, JSON.stringify(EX)); } catch (e) {}
+    safeRerender();
+  }
+  function safeRerender() {
+    var ae = document.activeElement;
+    if (ae && ae.tagName && /^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName) && ae.closest && ae.closest("#app")) return; // don't yank focus mid-edit
+    render();
+    if (UI.route.name === "home") scrollStrip();
+  }
+  // Defaults / array normalisation (RTDB drops empty arrays to null).
+  function applyProfileDefaults() {
+    S = S || {};
+    S.settings = S.settings || {};
+    if (S.settings.unit == null) S.settings.unit = "kg";
+    if (S.settings.restDefault == null) S.settings.restDefault = 75;
+    if (!S.settings.theme) S.settings.theme = THEME_BY_PROFILE[PROFILE] || "pink";
+    if (S.settings.dark == null) S.settings.dark = false;
+    if (!S.settings.displayName) S.settings.displayName = PROFILE.charAt(0).toUpperCase() + PROFILE.slice(1);
+    S.workouts = asArray(S.workouts);
+    S.logs = asArray(S.logs);
+    S.weights = asArray(S.weights);
+    if (!S.plan) S.plan = emptyPlan();
+    S.plan.weeks = asArray(S.plan.weeks);
+    S.plan.weeks.forEach(function (wk) { for (var i = 0; i < 7; i++) { wk[i] = asArray(wk[i]); } });
+    S.workouts.forEach(function (w) { w.items = asArray(w.items); });
+    S.logs.forEach(function (l) { l.items = asArray(l.items); l.items.forEach(function (it) { it.sets = asArray(it.sets); }); });
+  }
 
   function normName(n) { return String(n == null ? "" : n).trim().toLowerCase().replace(/\s+/g, " "); }
   function findExByName(n) { var k = normName(n); for (var i = 0; i < EX.length; i++) if (normName(EX[i].name) === k) return EX[i]; return null; }
@@ -103,17 +182,7 @@
     try { raw = localStorage.getItem(KEY); } catch (e) {}
     if (raw) { try { S = JSON.parse(raw); } catch (e) { S = null; } }
     if (!S) { S = seed(); save(); }
-    // migrations / defaults
-    S.settings = S.settings || {};
-    if (S.settings.unit == null) S.settings.unit = "kg";
-    if (S.settings.restDefault == null) S.settings.restDefault = 75;
-    if (!S.settings.theme) S.settings.theme = THEME_BY_PROFILE[PROFILE] || "pink";
-    if (S.settings.dark == null) S.settings.dark = false;
-    if (!S.settings.displayName) S.settings.displayName = PROFILE.charAt(0).toUpperCase() + PROFILE.slice(1);
-    S.workouts = S.workouts || [];
-    S.logs = S.logs || [];
-    S.weights = S.weights || [];
-    if (!S.plan) S.plan = emptyPlan();
+    applyProfileDefaults();
     migrateProfileExercises();
     // Legacy: convert an old in-progress S.active into a saved session log.
     if (S.active && S.active.items) {
@@ -1654,5 +1723,6 @@
   load();
   UI.stack = [curRouteStr()];
   render();
+  if (Cloud.init()) Cloud.start();   // begin cloud sync if Firebase is configured
   document.addEventListener("visibilitychange", function () { if (!document.hidden && UI.rest) updateRestTimer(); });
 })();
