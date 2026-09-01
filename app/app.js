@@ -427,7 +427,7 @@
   function sessionComplete(log) { var p = sessionProgress(log); return p.total > 0 && p.done === p.total; }
   function dayStatus(dk, d) {
     var ws = workoutsForDate(d);
-    if (!ws.length) return "rest";
+    if (!ws.length) return weightOn(dk) ? "done" : "rest"; // rest day ticks once a weight is logged
     var anyDone = false, anyProg = false;
     ws.forEach(function (w) { var s = findSession(dk, w.id); if (s) { if (sessionComplete(s)) anyDone = true; else anyProg = true; } });
     return anyDone ? "done" : (anyProg ? "progress" : "todo");
@@ -465,7 +465,8 @@
     var sel = UI.selectedDate || todayKey();
     var selDate = parseKey(sel), isToday = sel === todayKey();
     var todays = workoutsForDate(selDate);
-    var w = latestWeight();
+    var wOnSel = weightOn(sel), wAsOf = weightAsOf(sel);
+    var w = wOnSel || wAsOf; // show the selected day's weight, else the most recent up to it
     var wchart = weightSparkline();
     var streakN = workoutStreak();
 
@@ -508,7 +509,7 @@
       '<div class="tiles">' +
       '<div class="tile" data-nav="weight"><div class="k">Weight</div>' +
       '<div class="v">' + (w ? w.weight + ' <small>' + unit() + "</small>" : "—") + "</div>" +
-      '<div class="cap">' + (w ? relDay(w.date) : "No data") + "</div>" +
+      '<div class="cap">' + (w ? (wOnSel ? (isToday ? "Today" : esc(fmtNiceDate(selDate))) : "as of " + relDay(w.date).toLowerCase()) : (isToday ? "Tap to log" : "No weight this day")) + "</div>" +
       (wchart || "") + "</div>" +
       '<div class="tile" data-nav="progress"><div class="k">This Week</div>' +
       '<div class="v">' + workoutsThisWeek() + ' <small>workouts</small></div>' +
@@ -524,6 +525,12 @@
   function latestWeight() {
     if (!S.weights.length) return null;
     return S.weights.slice().sort(function (a, b) { return a.date < b.date ? 1 : -1; })[0];
+  }
+  // Weight logged on dk, else the most recent one on or before dk.
+  function weightAsOf(dk) {
+    var best = null;
+    S.weights.forEach(function (x) { if (x.date <= dk && (!best || x.date > best.date)) best = x; });
+    return best;
   }
   function workoutsThisWeek() {
     var now = new Date(); var start = new Date(); start.setDate(now.getDate() - planDow(now));
@@ -776,32 +783,36 @@
 
   /* ---------- WEIGHT ---------- */
   function viewWeight() {
+    var sel = UI.selectedDate || todayKey(), isToday = sel === todayKey();
     var sorted = S.weights.slice().sort(function (a, b) { return a.date < b.date ? 1 : -1; });
-    var todayW = weightOn(todayKey());
+    var selW = weightOn(sel);
     var chartPts = sorted.slice().reverse().slice(-30).map(function (p) {
       return { label: p.date.slice(5).replace("-", "/"), value: p.weight };
     });
+    var latest = sorted.length ? sorted[0] : null;
     var first = sorted.length ? sorted[sorted.length - 1] : null;
-    var change = (todayW && first && todayW.date !== first.date) ? round1(todayW.weight - first.weight) : null;
+    var change = (latest && first && latest.date !== first.date) ? round1(latest.weight - first.weight) : null;
     var list = sorted.slice(0, 30).map(function (p) {
       return '<div class="listitem"><div class="lt"><b>' + p.weight + " " + unit() + "</b>" +
         "<small>" + esc(p.date) + (p.note ? " · " + esc(p.note) : "") + "</small></div>" +
         '<button class="del" data-wdel="' + p.date + '" style="color:var(--muted-2);font-size:18px">✕</button></div>';
     }).join("");
-    return topbar("Weight") +
+    var dayLabel = isToday ? "Today" : fmtNiceDate(parseKey(sel));
+    return topbar("Weight", { back: "home" }) +
       '<div class="view">' +
       '<div class="card">' +
-      '<div class="smallcap">Today’s check-in</div>' +
+      '<div class="smallcap">Check-in for ' + esc(dayLabel) + "</div>" +
       '<div class="setrow" style="margin-top:10px">' +
-      '<div class="field"><input inputmode="decimal" data-wnew value="' + (todayW ? todayW.weight : "") + '" placeholder="Weight"><span class="unit">' + unit() + "</span></div>" +
+      '<div class="field"><input inputmode="decimal" data-wnew value="' + (selW ? selW.weight : "") + '" placeholder="Weight"><span class="unit">' + unit() + "</span></div>" +
       '<button class="btn sm" data-wsave style="width:auto;padding:14px 18px">Save</button></div>' +
-      (todayW ? '<div class="muted" style="margin-top:8px;font-size:13px">✓ Logged today. Saving again updates it.</div>' : "") +
+      (selW ? '<div class="muted" style="margin-top:8px;font-size:13px">✓ Logged for ' + esc(dayLabel.toLowerCase()) + ". Saving updates it.</div>" : "") +
+      (isToday ? "" : '<div class="muted" style="margin-top:8px;font-size:12.5px">Pick a different day on the Home calendar to log for it.</div>') +
       "</div>" +
       '<div class="tiles" style="margin-bottom:14px">' +
-      '<div class="tile"><div class="k">Current</div><div class="v">' + (todayW || first ? (todayW || first).weight + ' <small>' + unit() + "</small>" : "—") + '</div><div class="cap">' + (todayW || first ? relDay((todayW || first).date) : "") + "</div></div>" +
+      '<div class="tile"><div class="k">Latest</div><div class="v">' + (latest ? latest.weight + ' <small>' + unit() + "</small>" : "—") + '</div><div class="cap">' + (latest ? relDay(latest.date) : "") + "</div></div>" +
       '<div class="tile"><div class="k">Change</div><div class="v">' + (change != null ? (change > 0 ? "+" : "") + change + ' <small>' + unit() + "</small>" : "—") + '</div><div class="cap">since first log</div></div>' +
       "</div>" +
-      '<div class="card"><div class="smallcap">Trend</div>' + fullLine(chartPts) + "</div>" +
+      '<div class="card"><div class="smallcap">Trend</div>' + fullLine(chartPts, { unit: unit() }) + "</div>" +
       '<div class="section-label">History</div><div class="card">' + (list || '<div class="empty">No entries yet.</div>') + "</div>" +
       "</div>";
   }
@@ -826,7 +837,7 @@
     var wchartPts = S.weights.slice().sort(function (a, b) { return a.date < b.date ? -1 : 1; }).slice(-30)
       .map(function (p) { return { label: p.date.slice(5).replace("-", "/"), value: p.weight }; });
 
-    return topbar("Progress") +
+    return topbar("Progress", { back: "home" }) +
       '<div class="view">' +
       '<div class="tiles" style="margin-bottom:6px">' +
       '<div class="tile"><div class="k">Workouts</div><div class="v">' + S.logs.length + '</div><div class="cap">all time</div></div>' +
@@ -1375,11 +1386,13 @@
 
     /* ----- weight ----- */
     if (d.wsave != null) {
+      var wdk = UI.selectedDate || todayKey();
       var inp = document.querySelector("[data-wnew]"); var v = num(inp && inp.value);
       if (v == null) { toast("Enter a weight"); return; }
-      var existing = weightOn(todayKey());
-      if (existing) existing.weight = v; else S.weights.push({ date: todayKey(), weight: v, note: "" });
-      save(); render(); toast("Weight saved");
+      var existing = weightOn(wdk);
+      if (existing) existing.weight = v; else S.weights.push({ date: wdk, weight: v, note: "" });
+      save(); toast("Weight saved");
+      goBack("home");   // close back to home after logging
       return;
     }
     if (d.wdel != null) { S.weights = S.weights.filter(function (x) { return x.date !== d.wdel; }); save(); render(); return; }
