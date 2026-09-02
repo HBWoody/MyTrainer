@@ -834,9 +834,12 @@
   }
   function viewExerciseEdit(id) {
     var isNew = id === "new";
-    var e = isNew ? { id: uid(), name: "", muscle: "", videoUrl: "", note: "", bw: false, icon: "" } : exById(id);
+    var e = isNew ? { id: uid(), name: "", muscle: "", videoUrl: "", note: "", bw: false, icon: "", mode: "reps", timeUnit: "min" } : exById(id);
     if (!e) return topbar("Not found", { back: "exercises" }) + '<div class="view empty">Exercise not found.</div>';
+    if (!e.mode) e.mode = "reps";
+    if (!e.timeUnit) e.timeUnit = "min";
     UI.editingExercise = { obj: e, isNew: isNew };
+    var isTime = e.mode === "time";
     return topbar(isNew ? "New Exercise" : "Edit Exercise", { back: "exercises" }) +
       '<div class="view has-sticky">' +
       '<div class="muted" style="font-size:13px;margin:6px 2px 2px">📚 Exercises are shared between Adam and Char.</div>' +
@@ -849,6 +852,12 @@
       "</div>" +
       '<label class="field-label">Name</label><input class="input" data-ex="name" value="' + esc(e.name) + '" placeholder="e.g. Bench Press">' +
       '<label class="field-label">Muscle group</label><input class="input" data-ex="muscle" value="' + esc(e.muscle) + '" placeholder="e.g. Chest">' +
+      '<label class="field-label">Measured by</label>' +
+      '<div class="seg"><button class="' + (!isTime ? "on" : "") + '" data-exmode="reps">Reps</button>' +
+      '<button class="' + (isTime ? "on" : "") + '" data-exmode="time">Time</button></div>' +
+      '<div id="timeunitrow" style="' + (isTime ? "" : "display:none") + '"><label class="field-label">Time unit</label>' +
+      '<div class="seg"><button class="' + (e.timeUnit !== "sec" ? "on" : "") + '" data-extimeunit="min">Minutes</button>' +
+      '<button class="' + (e.timeUnit === "sec" ? "on" : "") + '" data-extimeunit="sec">Seconds</button></div></div>' +
       '<label class="field-label">Demo video link (optional)</label><input class="input" data-ex="videoUrl" value="' + esc(e.videoUrl) + '" placeholder="https://...">' +
       '<label class="field-label">Default note / cues (optional)</label><textarea class="input" data-ex="note" placeholder="Form cues...">' + esc(e.note) + "</textarea>" +
       '<label class="field-label" style="display:flex;align-items:center;gap:10px;margin-top:14px"><input type="checkbox" data-ex="bw" ' + (e.bw ? "checked" : "") + "> Bodyweight exercise</label>" +
@@ -1074,8 +1083,9 @@
         var expanded = UI.expanded[idx];
         noteHtml = '<div class="note ' + (expanded ? "" : "clamp") + '" data-notetoggle="' + idx + '">' + esc(it.note) + (it.note.length > 40 ? (expanded ? " ▲" : " ▾") : "") + "</div>";
       }
+      var exm = exById(it.exerciseId);
       var wUnit = it.bw ? "KG" : unit().toUpperCase();
-      var timed = isTimed(it.reps);
+      var timed = (exm && exm.mode === "time") || isTimed(it.reps);
       var tp = timed ? timeParts(it.reps) : null;
       var lastPerf = lastPerformance(it.exerciseId);
       var exdone = itemComplete(it);
@@ -1272,16 +1282,26 @@
     UI._itemSave = onSave; UI._itemDraft = JSON.parse(JSON.stringify(item));
     var it = UI._itemDraft;
     var e = exById(it.exerciseId);
+    var timeMode = e && e.mode === "time";
     var secOpts = ["Warm Up", "Workout", "Cool Down"].map(function (s) { return '<option ' + (it.section === s ? "selected" : "") + ">" + s + "</option>"; }).join("");
+    var tp = timeParts(it.reps);
+    var unit = (e && e.timeUnit) || (tp.unit === "SEC" ? "sec" : "min");
+    var secondField = timeMode
+      ? '<div><label class="field-label">Duration</label>' +
+        '<div class="row" style="gap:8px"><input class="input" inputmode="decimal" data-idf="reps" value="' + esc(tp.num) + '" placeholder="e.g. 20" style="flex:1">' +
+        '<select class="select" data-idf="timeunit" style="width:auto">' +
+        '<option value="min"' + (unit !== "sec" ? " selected" : "") + '>min</option>' +
+        '<option value="sec"' + (unit === "sec" ? " selected" : "") + '>sec</option></select></div></div>'
+      : '<div><label class="field-label">Reps</label><input class="input" data-idf="reps" value="' + esc(it.reps) + '" placeholder="12 or 10-12"></div>';
     openSheet('<h3>' + esc(e ? e.name : "Exercise") + "</h3>" +
       '<label class="field-label">Section</label><select class="select" data-idf="section">' + secOpts + "</select>" +
       '<div class="two"><div><label class="field-label">Sets</label><input class="input" inputmode="numeric" data-idf="sets" value="' + esc(it.sets) + '"></div>' +
-      '<div><label class="field-label">Reps</label><input class="input" data-idf="reps" value="' + esc(it.reps) + '" placeholder="12 or 10-12"></div></div>' +
+      secondField + "</div>" +
       '<div class="two"><div><label class="field-label">Rest (sec)</label><input class="input" inputmode="numeric" data-idf="rest" value="' + esc(it.rest) + '"></div>' +
       '<div><label class="field-label">Tempo</label><input class="input" data-idf="tempo" value="' + esc(it.tempo) + '" placeholder="3-0-0-1"></div></div>' +
-      '<label class="field-label">Starting weight (optional — pre-fills each set)</label><input class="input" data-idf="target" value="' + esc(it.target) + '" placeholder="e.g. 32">' +
+      (timeMode ? "" : '<label class="field-label">Starting weight (optional — pre-fills each set)</label><input class="input" data-idf="target" value="' + esc(it.target) + '" placeholder="e.g. 32">') +
       '<label class="field-label">Note</label><textarea class="input" data-idf="note">' + esc(it.note) + "</textarea>" +
-      '<label class="field-label" style="display:flex;align-items:center;gap:10px;margin-top:12px"><input type="checkbox" data-idf="bw" ' + (it.bw ? "checked" : "") + "> Bodyweight</label>" +
+      (timeMode ? "" : '<label class="field-label" style="display:flex;align-items:center;gap:10px;margin-top:12px"><input type="checkbox" data-idf="bw" ' + (it.bw ? "checked" : "") + "> Bodyweight</label>") +
       '<button class="btn" data-idsave style="margin-top:16px">Save exercise</button>');
   }
 
@@ -1356,7 +1376,7 @@
      ============================================================ */
   document.addEventListener("click", function (e) {
     var t = e.target;
-    var el = t.closest ? t.closest("[data-nav],[data-back],[data-open],[data-day],[data-playvideo],[data-closevideo],[data-additem],[data-itemedit],[data-itemdel],[data-savework],[data-saveex],[data-exdel],[data-delset],[data-sessdel],[data-notetoggle],[data-wsave],[data-wdel],[data-unit],[data-reset],[data-export],[data-import],[data-switch],[data-planadd],[data-plandel],[data-planweek],[data-restadd],[data-restskip],[data-restsub15],[data-restpill],[data-pick],[data-picknew],[data-idsave],[data-logdel],[data-settheme],[data-iconupload],[data-iconclear],[data-dark]") : null;
+    var el = t.closest ? t.closest("[data-nav],[data-back],[data-open],[data-day],[data-playvideo],[data-closevideo],[data-additem],[data-itemedit],[data-itemdel],[data-savework],[data-saveex],[data-exdel],[data-delset],[data-sessdel],[data-notetoggle],[data-wsave],[data-wdel],[data-unit],[data-reset],[data-export],[data-import],[data-switch],[data-planadd],[data-plandel],[data-planweek],[data-restadd],[data-restskip],[data-restsub15],[data-restpill],[data-pick],[data-picknew],[data-idsave],[data-logdel],[data-settheme],[data-iconupload],[data-iconclear],[data-dark],[data-exmode],[data-extimeunit]") : null;
     if (!el) return;
     var d = el.dataset;
 
@@ -1413,6 +1433,17 @@
       saveEx(); go("exercises"); toast("Deleted");
       return;
     }
+    if (d.exmode != null) {
+      UI.editingExercise.obj.mode = d.exmode;
+      el.parentNode.querySelectorAll("[data-exmode]").forEach(function (b) { b.classList.toggle("on", b.dataset.exmode === d.exmode); });
+      var row = document.getElementById("timeunitrow"); if (row) row.style.display = d.exmode === "time" ? "" : "none";
+      return;
+    }
+    if (d.extimeunit != null) {
+      UI.editingExercise.obj.timeUnit = d.extimeunit;
+      el.parentNode.querySelectorAll("[data-extimeunit]").forEach(function (b) { b.classList.toggle("on", b.dataset.extimeunit === d.extimeunit); });
+      return;
+    }
     if (d.iconupload != null) {
       var fin = document.createElement("input"); fin.type = "file"; fin.accept = "image/*";
       fin.onchange = function () {
@@ -1444,13 +1475,20 @@
 
     /* ----- item editor sheet ----- */
     if (d.idsave != null) {
-      var draft = UI._itemDraft;
+      var draft = UI._itemDraft, tunit = null;
       document.querySelectorAll("[data-idf]").forEach(function (inp) {
         var f = inp.dataset.idf;
         if (f === "bw") draft.bw = inp.checked;
+        else if (f === "timeunit") tunit = inp.value;
         else if (f === "sets" || f === "rest") draft[f] = clamp(parseInt(inp.value, 10) || 0, 0, 999);
         else draft[f] = inp.value;
       });
+      var exm = exById(draft.exerciseId);
+      if (exm && exm.mode === "time") {
+        var numv = String(draft.reps || "").replace(/[^\d.]/g, "");
+        draft.reps = (numv || "") + " " + ((tunit || exm.timeUnit) === "sec" ? "sec" : "min");
+        draft.bw = true; draft.target = "";   // time exercises: bodyweight, no starting weight
+      }
       if (!draft.sets) draft.sets = 1;
       if (UI._itemSave) UI._itemSave(draft);
       return;
