@@ -1043,12 +1043,20 @@
     stopRest();
     go("session:" + log.id);
   }
-  function setFilled(st, bw) {
-    var r = st.reps != null && String(st.reps).trim() !== "";
-    var wv = st.weight != null && String(st.weight).trim() !== "";
-    return r && (bw || wv);
+  // A target like "45 min", "20 min", "60s" is time-based, not reps.
+  function isTimed(reps) { reps = String(reps == null ? "" : reps); return /\b(min|mins|minute|minutes|hr|hrs|hour|hours|sec|secs|second|seconds)\b/i.test(reps) || /^\s*\d+(?:\.\d+)?\s*s\s*$/i.test(reps); }
+  function timeParts(reps) {
+    var m = String(reps == null ? "" : reps).match(/(\d+(?:\.\d+)?)\s*(seconds|second|secs|sec|s|minutes|minute|mins|min|hours|hour|hrs|hr)?/i);
+    var u = (m && m[2] ? m[2] : "min").toLowerCase();
+    return { num: m ? m[1] : "", unit: (/^s|^sec/.test(u) ? "SEC" : (/^h/.test(u) ? "HR" : "MIN")) };
   }
-  function itemComplete(it) { return it.sets.length > 0 && it.sets.every(function (s) { return setFilled(s, it.bw); }); }
+  function setFilled(st, it) {
+    var r = st.reps != null && String(st.reps).trim() !== "";
+    if (isTimed(it.reps)) return r;                    // timed: only the time value matters
+    var wv = st.weight != null && String(st.weight).trim() !== "";
+    return r && (it.bw || wv);
+  }
+  function itemComplete(it) { return it.sets.length > 0 && it.sets.every(function (s) { return setFilled(s, it); }); }
   function sessionProgress(log) {
     var done = 0; log.items.forEach(function (it) { if (itemComplete(it)) done++; });
     return { done: done, total: log.items.length };
@@ -1067,30 +1075,38 @@
         noteHtml = '<div class="note ' + (expanded ? "" : "clamp") + '" data-notetoggle="' + idx + '">' + esc(it.note) + (it.note.length > 40 ? (expanded ? " ▲" : " ▾") : "") + "</div>";
       }
       var wUnit = it.bw ? "KG" : unit().toUpperCase();
+      var timed = isTimed(it.reps);
+      var tp = timed ? timeParts(it.reps) : null;
       var lastPerf = lastPerformance(it.exerciseId);
       var exdone = itemComplete(it);
       var setsHtml = it.sets.map(function (st, si) {
         var phr = it.reps || "";
         var lp = lastPerf && lastPerf.sets[si] ? lastPerf.sets[si] : null;
         var lastHtml = lp
-          ? '<span class="lastwo"><span class="k">LAST WORKOUT:</span> <b>' + esc(lp.reps || "–") + "</b> REPS @ <b>" + esc(lp.weight || "–") + "</b> " + wUnit + "</span>"
+          ? (timed
+            ? '<span class="lastwo"><span class="k">LAST:</span> <b>' + esc(lp.reps || "–") + "</b> " + tp.unit + "</span>"
+            : '<span class="lastwo"><span class="k">LAST WORKOUT:</span> <b>' + esc(lp.reps || "–") + "</b> REPS @ <b>" + esc(lp.weight || "–") + "</b> " + wUnit + "</span>")
           : (lastPerf ? '<span class="lastwo"></span>' : '<span class="lastwo firsttime">First time</span>');
-        var fill = setFilled(st, it.bw);
+        var fill = setFilled(st, it);
+        var fields = timed
+          ? '<div class="fieldbox ' + (fill ? "done" : "") + '">' +
+            '<span class="fb-label">TIME:</span>' +
+            '<input inputmode="decimal" data-sr="' + idx + ":" + si + '" value="' + esc(st.reps) + '" placeholder="' + esc(tp.num) + '">' +
+            '<span class="fb-unit">' + tp.unit + "</span></div>"
+          : '<div class="fieldbox ' + (fill ? "done" : "") + '">' +
+            '<span class="fb-label">REPS:</span>' +
+            '<input inputmode="numeric" data-sr="' + idx + ":" + si + '" value="' + esc(st.reps) + '" placeholder="' + esc(phr) + '">' +
+            '<span class="fb-unit">EA</span></div>' +
+            '<div class="fieldbox ' + (fill ? "done" : "") + '">' +
+            '<span class="fb-label">WEIGHT:</span>' +
+            '<input inputmode="decimal" data-sw="' + idx + ":" + si + '" value="' + esc(st.weight) + '" placeholder="">' +
+            '<span class="fb-unit">' + wUnit + "</span></div>";
         return '<div class="setblk">' +
           '<div class="setblk-top">' +
           '<span class="setno">Set ' + (si + 1) + "</span>" +
           lastHtml +
           "</div>" +
-          '<div class="setblk-row">' +
-          '<div class="fieldbox ' + (fill ? "done" : "") + '">' +
-          '<span class="fb-label">REPS:</span>' +
-          '<input inputmode="numeric" data-sr="' + idx + ":" + si + '" value="' + esc(st.reps) + '" placeholder="' + esc(phr) + '">' +
-          '<span class="fb-unit">EA</span></div>' +
-          '<div class="fieldbox ' + (fill ? "done" : "") + '">' +
-          '<span class="fb-label">WEIGHT:</span>' +
-          '<input inputmode="decimal" data-sw="' + idx + ":" + si + '" value="' + esc(st.weight) + '" placeholder="">' +
-          '<span class="fb-unit">' + wUnit + "</span></div>" +
-          "</div></div>";
+          '<div class="setblk-row">' + fields + "</div></div>";
       }).join("");
       var eLive = exById(it.exerciseId);
       var liveIcon = (eLive && eLive.icon) ? eLive.icon : (it.icon || "");
@@ -1098,7 +1114,7 @@
       html += '<div class="card exq' + (exdone ? " exdone" : "") + '"><div class="head">' +
         thumbTag({ icon: liveIcon, videoUrl: liveVid }) +
         '<div class="grow"><div class="name">' + esc(it.name) + '<span class="exdone-tick">' + (exdone ? " ✓" : "") + "</span></div>" +
-        '<div class="pills"><span class="pill">Reps: ' + esc(it.reps) + "</span>" +
+        '<div class="pills"><span class="pill">' + (timed ? "Time: " : "Reps: ") + esc(it.reps) + "</span>" +
         (it.rest > 0
           ? '<button class="pill pill-rest" data-restpill="' + it.rest + '" data-restname="' + esc(it.name) + '">Rest: ' + fmtRest(it.rest) + " ⏱</button>"
           : '<span class="pill">Rest: —</span>') +
@@ -1553,7 +1569,7 @@
     var key = (isW ? input.dataset.sw : input.dataset.sr).split(":");
     var it = log.items[+key[0]]; if (!it) return;
     var st = it.sets[+key[1]]; if (!st) return;
-    var fill = setFilled(st, it.bw);
+    var fill = setFilled(st, it);
     var blk = input.closest(".setblk");
     if (blk) blk.querySelectorAll(".fieldbox").forEach(function (b) { b.classList.toggle("done", fill); });
     var card = input.closest(".exq"), exdone = itemComplete(it);
