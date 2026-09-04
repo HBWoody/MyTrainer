@@ -59,17 +59,34 @@
   var SEED_VERSION = 2; // bump to refresh the starter program on existing (unused) profiles
   var UI = { route: locationRoute(), toast: null, expanded: {} }; // transient
 
-  function save() { var ok = true; try { localStorage.setItem(KEY, JSON.stringify(S)); } catch (e) { ok = false; } Cloud.scheduleProfile(); return ok; }
-  function saveEx() { var ok = true; try { localStorage.setItem(SHARED_KEY, JSON.stringify(EX)); } catch (e) { ok = false; } Cloud.scheduleEx(); return ok; }
+  function save() { try { localStorage.setItem(KEY, JSON.stringify(S)); } catch (e) {} Cloud.syncMisc(); return true; }
+  function saveEx() { try { localStorage.setItem(SHARED_KEY, JSON.stringify(EX)); } catch (e) {} return true; }
+
+  function asArray(v) { return Array.isArray(v) ? v : (v && typeof v === "object" ? Object.keys(v).map(function (k) { return v[k]; }) : []); }
+  function mapById(arr) { var m = {}; (arr || []).forEach(function (x) { if (x && x.id != null) m[x.id] = x; }); return m; }
+  function mapByDate(arr) { var m = {}; (arr || []).forEach(function (x) { if (x && x.date != null) m[x.date] = x; }); return m; }
+  function stableStr(o) {
+    if (Array.isArray(o)) return "[" + o.map(stableStr).join(",") + "]";
+    if (o && typeof o === "object") return "{" + Object.keys(o).sort().map(function (k) { return JSON.stringify(k) + ":" + stableStr(o[k]); }).join(",") + "}";
+    return JSON.stringify(o === undefined ? null : o);
+  }
+  function bySort(arr, key) { return (arr || []).slice().sort(function (a, b) { return String(a && a[key]) < String(b && b[key]) ? -1 : 1; }); }
+  function canonProfile(s) { return stableStr({ settings: s.settings, plan: s.plan, seedVersion: s.seedVersion, workouts: bySort(s.workouts, "id"), logs: bySort(s.logs, "id"), weights: bySort(s.weights, "date") }); }
+  function canonEx(arr) { return stableStr(bySort(arr, "id")); }
+  function fromCloudProfile(v) {
+    return { profile: v.profile || PROFILE, seedVersion: v.seedVersion, settings: v.settings || {}, plan: v.plan || emptyPlan(), workouts: asArray(v.workouts), logs: asArray(v.logs), weights: asArray(v.weights) };
+  }
 
   /* ============================================================
-     CLOUD SYNC — Firebase Realtime Database (optional).
-     Source of truth when configured; localStorage is the offline cache.
-     Enabled by filling window.MYTRAINER_FIREBASE (app/firebase-config.js).
+     CLOUD SYNC — Firebase Realtime Database.
+     Concurrency-safe: the shared exercise library and each profile's
+     logs/weights are keyed maps, written one item at a time — so concurrent
+     edits to DIFFERENT items merge instead of clobbering. Different profiles
+     are separate nodes. localStorage is the offline cache.
      ============================================================ */
   var Cloud = {
     ready: false, db: null, pRef: null, eRef: null,
-    lastP: null, lastE: null, pTimer: null, eTimer: null,
+    lastP: null, lastE: null, miscTimer: null, logTimer: null, _pendingLog: null,
     init: function () {
       if (this.ready) return true;
       if (!window.MYTRAINER_FIREBASE || !window.firebase || !window.firebase.database) return false;
@@ -78,8 +95,7 @@
         this.db = firebase.database();
         this.pRef = this.db.ref("profiles/" + PROFILE);
         this.eRef = this.db.ref("exercises");
-        this.ready = true;
-        return true;
+        this.ready = true; return true;
       } catch (e) { this.ready = false; return false; }
     },
     start: function () {
@@ -87,32 +103,53 @@
       var self = this, firstP = true, firstE = true;
       this.eRef.on("value", function (snap) {
         var v = snap.val();
-        if (firstE) { firstE = false; if (v != null) adoptEx(v); else self.pushEx(); return; }
-        if (v != null && JSON.stringify(v) !== self.lastE) adoptEx(v);
+        if (firstE) {
+          firstE = false;
+          if (v == null) { self.pushAllEx(); return; }
+          if (Array.isArray(v)) { self.eRef.set(mapById(asArray(v))); return; } // one-time: legacy array -> keyed map
+        }
+        if (v == null) return;
+        var arr = asArray(v), c = canonEx(arr);
+        if (c !== self.lastE) adoptEx(arr, c);
       }, function () {});
       this.pRef.on("value", function (snap) {
         var v = snap.val();
-        if (firstP) { firstP = false; if (v != null) adoptProfile(v); else self.pushProfile(); return; }
-        if (v != null && JSON.stringify(v) !== self.lastP) adoptProfile(v);
+        if (firstP) {
+          firstP = false;
+          if (v == null) { self.pushAllProfile(); return; }
+          if (Array.isArray(v.logs)) self.pRef.child("logs").set(mapById(asArray(v.logs)));
+          if (Array.isArray(v.weights)) self.pRef.child("weights").set(mapByDate(asArray(v.weights)));
+        }
+        if (v == null) return;
+        var cs = fromCloudProfile(v);
+        if (canonProfile(cs) !== self.lastP) adoptProfile(cs);
       }, function () {});
     },
-    scheduleProfile: function () { if (!this.ready) return; var s = this; clearTimeout(this.pTimer); this.pTimer = setTimeout(function () { s.pushProfile(); }, 700); },
-    scheduleEx: function () { if (!this.ready) return; var s = this; clearTimeout(this.eTimer); this.eTimer = setTimeout(function () { s.pushEx(); }, 700); },
-    pushProfile: function () { if (!this.ready) return; try { this.lastP = JSON.stringify(S); this.pRef.set(JSON.parse(this.lastP)); } catch (e) {} },
-    pushEx: function () { if (!this.ready) return; try { this.lastE = JSON.stringify(EX); this.eRef.set(JSON.parse(this.lastE)); } catch (e) {} }
+    syncMisc: function () { if (!this.ready) return; var s = this; clearTimeout(this.miscTimer); this.miscTimer = setTimeout(function () { s.flushMisc(); }, 700); },
+    flushMisc: function () { if (!this.ready) return; try { this.pRef.update({ settings: S.settings, plan: S.plan, workouts: S.workouts, profile: S.profile || PROFILE, seedVersion: S.seedVersion == null ? null : S.seedVersion }); this.lastP = canonProfile(S); } catch (e) {} },
+    scheduleLog: function (log) { if (!this.ready || !log) return; var s = this; this._pendingLog = log; clearTimeout(this.logTimer); this.logTimer = setTimeout(function () { s.putLog(s._pendingLog); }, 500); },
+    putLog: function (log) { if (!this.ready || !log) return; try { this.pRef.child("logs/" + log.id).set(log); this.lastP = canonProfile(S); } catch (e) {} },
+    delLog: function (id) { if (!this.ready) return; try { this.pRef.child("logs/" + id).remove(); this.lastP = canonProfile(S); } catch (e) {} },
+    putWeight: function (w) { if (!this.ready || !w) return; try { this.pRef.child("weights/" + w.date).set(w); this.lastP = canonProfile(S); } catch (e) {} },
+    delWeight: function (date) { if (!this.ready) return; try { this.pRef.child("weights/" + date).remove(); this.lastP = canonProfile(S); } catch (e) {} },
+    putExercise: function (e) { if (!this.ready || !e) return; try { this.eRef.child(e.id).set(e); this.lastE = canonEx(EX); } catch (er) {} },
+    delExercise: function (id) { if (!this.ready) return; try { this.eRef.child(id).remove(); this.lastE = canonEx(EX); } catch (e) {} },
+    pushAllProfile: function () { if (!this.ready) return; try { this.pRef.set({ profile: S.profile || PROFILE, seedVersion: S.seedVersion == null ? null : S.seedVersion, settings: S.settings, plan: S.plan, workouts: S.workouts, logs: mapById(S.logs), weights: mapByDate(S.weights) }); this.lastP = canonProfile(S); } catch (e) {} },
+    pushAllEx: function () { if (!this.ready) return; try { this.eRef.set(mapById(EX)); this.lastE = canonEx(EX); } catch (e) {} }
   };
-  function asArray(v) { return Array.isArray(v) ? v : (v && typeof v === "object" ? Object.keys(v).map(function (k) { return v[k]; }) : []); }
-  function adoptProfile(val) {
-    Cloud.lastP = JSON.stringify(val);
-    S = val;
-    applyProfileDefaults();
+  function adoptProfile(cs) {
+    // Preserve the session the user is editing right now, so a remote change elsewhere can't wipe it.
+    if (UI.route && UI.route.name === "session" && UI.route.id && S && S.logs) {
+      var mine = S.logs.filter(function (l) { return l && l.id === UI.route.id; })[0];
+      if (mine) { var i = -1; cs.logs.forEach(function (l, k) { if (l && l.id === UI.route.id) i = k; }); if (i >= 0) cs.logs[i] = mine; else cs.logs.push(mine); }
+    }
+    S = cs; applyProfileDefaults();
+    Cloud.lastP = canonProfile(S);
     try { localStorage.setItem(KEY, JSON.stringify(S)); } catch (e) {}
-    applyTheme();
-    safeRerender();
+    applyTheme(); safeRerender();
   }
-  function adoptEx(val) {
-    Cloud.lastE = JSON.stringify(val);
-    EX = asArray(val);
+  function adoptEx(arr, c) {
+    EX = arr; Cloud.lastE = c != null ? c : canonEx(arr);
     try { localStorage.setItem(SHARED_KEY, JSON.stringify(EX)); } catch (e) {}
     safeRerender();
   }
@@ -1048,7 +1085,7 @@
   function openWorkoutSession(workoutId, dk) {
     dk = dk || todayKey();
     var log = findSession(dk, workoutId);
-    if (!log) { log = createSession(workoutId, dk); if (!log) return; S.logs.push(log); save(); }
+    if (!log) { log = createSession(workoutId, dk); if (!log) return; S.logs.push(log); save(); Cloud.putLog(log); }
     stopRest();
     go("session:" + log.id);
   }
@@ -1424,13 +1461,13 @@
       readExerciseForm(o);
       if (!o.name.trim()) { toast("Name required"); return; }
       if (ee.isNew) EX.push(o);
-      saveEx(); go("exercises"); toast("Saved");
+      saveEx(); Cloud.putExercise(o); go("exercises"); toast("Saved");
       return;
     }
     if (d.exdel != null) {
       var o2 = UI.editingExercise.obj;
       EX = EX.filter(function (x) { return x.id !== o2.id; });
-      saveEx(); go("exercises"); toast("Deleted");
+      saveEx(); Cloud.delExercise(o2.id); go("exercises"); toast("Deleted");
       return;
     }
     if (d.exmode != null) {
@@ -1454,7 +1491,7 @@
           var pv = document.getElementById("iconpreview"); if (pv) pv.innerHTML = '<img class="exicon" src="' + dataUrl + '" alt="">';
           // Persist immediately for existing exercises so it carries through everywhere
           // without needing the Save button. (New exercises persist when Created.)
-          if (!ee.isNew) { toast(saveEx() ? "Icon saved ✓" : "Couldn’t save — storage may be full"); }
+          if (!ee.isNew) { saveEx(); Cloud.putExercise(ee.obj); toast("Icon saved ✓"); }
           else { toast("Icon added — press Create to save"); }
         });
       };
@@ -1464,7 +1501,7 @@
     if (d.iconclear != null) {
       var ee2 = UI.editingExercise; ee2.obj.icon = "";
       var pv2 = document.getElementById("iconpreview"); if (pv2) pv2.innerHTML = iconPreviewInner(ee2.obj);
-      if (!ee2.isNew) saveEx();
+      if (!ee2.isNew) { saveEx(); Cloud.putExercise(ee2.obj); }
       toast("Icon removed");
       return;
     }
@@ -1497,14 +1534,14 @@
     /* ----- session logger ----- */
     if (d.delset != null) {
       var p = d.delset.split(":"), lg = curSession();
-      if (lg) { var it2 = lg.items[+p[0]]; if (it2.sets.length > 1) it2.sets.splice(+p[1], 1); save(); render(); }
+      if (lg) { var it2 = lg.items[+p[0]]; if (it2.sets.length > 1) it2.sets.splice(+p[1], 1); save(); Cloud.putLog(lg); render(); }
       return;
     }
     if (d.notetoggle != null) { UI.expanded[+d.notetoggle] = !UI.expanded[+d.notetoggle]; render(); return; }
     if (d.sessdel != null) {
       if (confirm("Delete this workout session? This removes it from your history.")) {
         var lg2 = curSession();
-        if (lg2) { S.logs = S.logs.filter(function (x) { return x.id !== lg2.id; }); save(); }
+        if (lg2) { S.logs = S.logs.filter(function (x) { return x.id !== lg2.id; }); save(); Cloud.delLog(lg2.id); }
         stopRest(); goBack("history");
       }
       return;
@@ -1521,11 +1558,11 @@
       if (v == null) { toast("Enter a weight"); return; }
       var existing = weightOn(wdk);
       if (existing) existing.weight = v; else S.weights.push({ date: wdk, weight: v, note: "" });
-      save(); toast("Weight saved");
+      save(); Cloud.putWeight(weightOn(wdk)); toast("Weight saved");
       goBack("home");   // close back to home after logging
       return;
     }
-    if (d.wdel != null) { S.weights = S.weights.filter(function (x) { return x.date !== d.wdel; }); save(); render(); return; }
+    if (d.wdel != null) { S.weights = S.weights.filter(function (x) { return x.date !== d.wdel; }); save(); Cloud.delWeight(d.wdel); render(); return; }
 
     /* ----- plan editor ----- */
     if (d.planweek != null) { UI.planWeek = +d.planweek; render(); return; }
@@ -1552,7 +1589,7 @@
     if (d.dark != null) { S.settings.dark = d.dark === "1"; applyTheme(); save(); render(); return; }
     if (d.reset != null) {
       if (confirm("Delete ALL data for " + PROFILE + "? This cannot be undone.")) {
-        localStorage.removeItem(KEY); S = null; load(); go("home"); toast("Reset");
+        localStorage.removeItem(KEY); S = null; load(); Cloud.pushAllProfile(); go("home"); toast("Reset");
       }
       return;
     }
@@ -1584,8 +1621,8 @@
   document.addEventListener("input", function (e) {
     var t = e.target;
     // session set inputs -> write straight into the current session log
-    if (t.dataset && t.dataset.sw != null) { var p = t.dataset.sw.split(":"); var lg = curSession(); if (lg) { lg.items[+p[0]].sets[+p[1]].weight = t.value; save(); } return; }
-    if (t.dataset && t.dataset.sr != null) { var q = t.dataset.sr.split(":"); var l2 = curSession(); if (l2) { l2.items[+q[0]].sets[+q[1]].reps = t.value; save(); } return; }
+    if (t.dataset && t.dataset.sw != null) { var p = t.dataset.sw.split(":"); var lg = curSession(); if (lg) { lg.items[+p[0]].sets[+p[1]].weight = t.value; save(); Cloud.scheduleLog(lg); } return; }
+    if (t.dataset && t.dataset.sr != null) { var q = t.dataset.sr.split(":"); var l2 = curSession(); if (l2) { l2.items[+q[0]].sets[+q[1]].reps = t.value; save(); Cloud.scheduleLog(l2); } return; }
     // generic data-set bindings (settings, plan)
     if (t.dataset && t.dataset.set != null) { setPath(t.dataset.set, t.type === "checkbox" ? t.checked : t.value); save(); return; }
     // workout name kept in draft (read on save; also live so re-render keeps it)
@@ -1618,7 +1655,7 @@
     var pr = sessionProgress(log), comp = pr.total > 0 && pr.done === pr.total;
     var pill = document.getElementById("sessprog");
     if (pill) { pill.textContent = comp ? "✓ Complete" : pr.done + " / " + pr.total; pill.classList.toggle("done", comp); }
-    save();
+    save(); Cloud.putLog(log);
   }
 
   document.addEventListener("change", function (e) {
@@ -1764,13 +1801,17 @@
         try {
           var data = JSON.parse(rd.result);
           if (!confirm("Replace all current data for " + PROFILE + " with this backup?")) return;
+          var withEx = false;
           if (data && data._mytrainer && data.profile) {
             S = data.profile;
-            if (Array.isArray(data.exercises)) { EX = data.exercises; saveEx(); }
+            if (Array.isArray(data.exercises)) { EX = data.exercises; saveEx(); withEx = true; }
           } else if (data && data.settings) {
             S = data; // legacy single-profile backup (may contain its own exercises → migrated in load())
           } else { throw new Error("bad"); }
-          save(); load(); go("home"); toast("Imported");
+          save(); load();
+          Cloud.pushAllProfile();
+          if (withEx) EX.forEach(function (e) { Cloud.putExercise(e); });
+          go("home"); toast("Imported");
         } catch (err) { toast("Invalid backup file"); }
       };
       rd.readAsText(f);
