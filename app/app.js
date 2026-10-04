@@ -87,6 +87,7 @@
   var Cloud = {
     ready: false, db: null, pRef: null, eRef: null,
     lastP: null, lastE: null, miscTimer: null, logTimer: null, _pendingLog: null,
+    gotP: false, gotE: false, progChecked: false,
     init: function () {
       if (this.ready) return true;
       if (!window.MYTRAINER_FIREBASE || !window.firebase || !window.firebase.database) return false;
@@ -105,25 +106,33 @@
         var v = snap.val();
         if (firstE) {
           firstE = false;
-          if (v == null) { self.pushAllEx(); return; }
+          if (v == null) { self.pushAllEx(); self.gotE = true; self.afterFirst(); return; }
           if (Array.isArray(v)) { self.eRef.set(mapById(asArray(v))); return; } // one-time: legacy array -> keyed map
         }
         if (v == null) return;
         var arr = asArray(v), c = canonEx(arr);
         if (c !== self.lastE) adoptEx(arr, c);
+        self.gotE = true; self.afterFirst();
       }, function () {});
       this.pRef.on("value", function (snap) {
         var v = snap.val();
         if (firstP) {
           firstP = false;
-          if (v == null) { self.pushAllProfile(); return; }
+          if (v == null) { self.pushAllProfile(); self.gotP = true; self.afterFirst(); return; }
           if (Array.isArray(v.logs)) self.pRef.child("logs").set(mapById(asArray(v.logs)));
           if (Array.isArray(v.weights)) self.pRef.child("weights").set(mapByDate(asArray(v.weights)));
         }
         if (v == null) return;
         var cs = fromCloudProfile(v);
         if (canonProfile(cs) !== self.lastP) adoptProfile(cs);
+        self.gotP = true; self.afterFirst();
       }, function () {});
+    },
+    // Program updates need the cloud's profile AND exercise library, so they reference the shared exercise ids.
+    afterFirst: function () {
+      if (this.progChecked || !this.gotP || !this.gotE) return;
+      this.progChecked = true;
+      if (applyProgramUpdate()) { save(); safeRerender(); }
     },
     syncMisc: function () { if (!this.ready) return; var s = this; clearTimeout(this.miscTimer); this.miscTimer = setTimeout(function () { s.flushMisc(); }, 700); },
     flushMisc: function () { if (!this.ready) return; try { this.pRef.update({ settings: S.settings, plan: S.plan, workouts: S.workouts, profile: S.profile || PROFILE, seedVersion: S.seedVersion == null ? null : S.seedVersion }); this.lastP = canonProfile(S); } catch (e) {} },
@@ -254,6 +263,7 @@
       }
       S.seedVersion = SEED_VERSION;
     }
+    if (!window.MYTRAINER_FIREBASE) applyProgramUpdate(); // with cloud sync: runs once both first snapshots arrive
     save();
     applyTheme();
   }
@@ -349,6 +359,91 @@
     wk[4] = [s.workouts[2].id]; // Friday    — Posterior / Quads
     s.plan = { name: "3 Day Split", startDate: todayKey(), repeat: true, weeks: [wk] };
     return s;
+  }
+
+  /* ---------- Program updates (one-time, per profile) ----------
+     Adds a new program's workouts alongside the existing ones and points the
+     plan at them. Old workouts, logs and exercise history are kept. Tracked by
+     settings.programVersion so it syncs and runs once across devices. */
+  var PROGRAM_UPDATES = {
+    char: { version: 2, build: charProgramV2 }
+  };
+  // Char's 3 Day Split 2.0 — same Mon/Wed/Fri focus, more volume + new exercises.
+  function charProgramV2() {
+    var newEx = [
+      ["Banded Glute Bridge", "Glutes", { bw: true }], ["Banded Clamshells", "Glutes", { bw: true }],
+      ["DB Sumo Deadlift", "Glutes"], ["Cable Glute Kickback", "Glutes"],
+      ["Lat Pulldown", "Back"], ["EZ Bar Cable Bicep Curls", "Biceps"],
+      ["Bodyweight Squats", "Quads", { bw: true }], ["Hack Squat", "Quads"],
+      ["Leg Extension", "Quads"], ["Cable Pull-Through", "Glutes / Hamstrings"]
+    ];
+    function I(name, o) { return item(exIdByName(name), o); }
+    ensureSeedExercises();
+    newEx.forEach(function (r) { if (!findExByName(r[0])) EX.push(ex(r[0], r[1], r[2] || {})); });
+
+    var glutes = {
+      id: uid(), name: "Glutes and Hamstrings 2.0",
+      items: [
+        I("Pre Workout Stretches", { section: "Warm Up", sets: 1, reps: "1", rest: 0, bw: true, note: "Repeat each side, hold each stretch for 20–30s." }),
+        I("Banded Glute Bridge", { section: "Warm Up", sets: 2, reps: "20", rest: 0, bw: true, note: "2s squeeze at the top." }),
+        I("Banded Clamshells", { section: "Warm Up", sets: 1, reps: "15", rest: 0, bw: true, note: "15 each side." }),
+        I("Barbell Glute Drive / Hip Thrusts", { sets: 4, reps: "8-10", rest: 120, tempo: "3-0-0-1", note: "Go heavier than before. Hold 2s at the top, drive with your glutes." }),
+        I("DB Sumo Deadlift", { sets: 3, reps: "10-12", rest: 90, note: "Wide stance, push hips back, squeeze glutes at the top." }),
+        I("Lying Hamstring Curls", { sets: 3, reps: "10-12", rest: 75, note: "Keep hips pressed into the pad. Last set: drop set." }),
+        I("Leg Press", { sets: 3, reps: "12", rest: 120, tempo: "3-0-0-1", note: "Feet high and wide for glutes. Full depth, don't lock knees." }),
+        I("Abductor", { sets: 3, reps: "16", rest: 90, note: "8 upright, 8 leaning forward. Last set: add 10 partial reps to burn out." }),
+        I("Hyper Extension", { sets: 3, reps: "12-15", rest: 75, note: "Use your glutes to pull yourself up. Hold a plate once it's easy." }),
+        I("Cable Glute Kickback", { sets: 2, reps: "15", rest: 45, note: "15 each leg. Squeeze at the top, don't arch your lower back." })
+      ]
+    };
+    var upper = {
+      id: uid(), name: "Tricep / Bicep / Shoulders 2.0",
+      items: [
+        I("Cable Rope Face Pulls", { sets: 3, reps: "15", rest: 60, note: "Squeeze the back at the end of the movement." }),
+        I("Lat Pulldown", { sets: 3, reps: "10-12", rest: 90, note: "Pull to upper chest, chest up, squeeze shoulder blades down." }),
+        I("Shoulder Press Machine", { sets: 3, reps: "4-4-4", rest: 150, note: "Cluster set: 4, rest 10s, 4, rest 10s, finish 4." }),
+        I("DB Lateral Raises", { sets: 3, reps: "12-15", rest: 60, note: "Don't throw the weight or shrug your neck. Last set: drop set." }),
+        I("Rope Tricep Pushdown", { sets: 3, reps: "12-15", rest: 60, note: "Keep shoulders stationary, only use elbows." }),
+        I("Tricep Dips Machine", { sets: 3, reps: "10", rest: 75 }),
+        I("DB Bicep Curl", { sets: 3, reps: "12", rest: 60, note: "Don't use shoulders to pull the weight up, squeeze." }),
+        I("EZ Bar Cable Bicep Curls", { sets: 3, reps: "10", rest: 60, note: "Elbows pinned to your sides, squeeze at the top." })
+      ]
+    };
+    var lower = {
+      id: uid(), name: "Posterior / Quads 2.0",
+      items: [
+        I("Bodyweight Squats", { section: "Warm Up", sets: 1, reps: "15", rest: 0, bw: true }),
+        I("Banded Glute Bridge", { section: "Warm Up", sets: 1, reps: "15", rest: 0, bw: true }),
+        I("Smith Machine Squats", { sets: 3, reps: "8-10", rest: 120, tempo: "3-0-0-1", note: "Feet closer together to target quads. Go heavier than before." }),
+        I("DB RDL", { sets: 3, reps: "10", rest: 90, note: "Slight bend in the knees, slow and controlled. Move to barbell when the heaviest DBs get easy." }),
+        I("Hack Squat", { sets: 3, reps: "10-12", rest: 90, note: "Full depth, controlled. Goblet squat if no machine." }),
+        I("Leg Extension", { sets: 3, reps: "12-15", rest: 60, note: "1s squeeze at the top." }),
+        I("Cable Pull-Through", { sets: 3, reps: "12-15", rest: 60, note: "Hinge at the hips, snap through with your glutes." }),
+        I("Adductor", { sets: 3, reps: "12", rest: 60, note: "Hold 2s at the inner movement." })
+      ]
+    };
+    var wk = {}; for (var i = 0; i < 7; i++) wk[i] = [];
+    wk[0] = [glutes.id]; // Monday    — Glutes and Hamstrings 2.0
+    wk[2] = [upper.id];  // Wednesday — Tricep / Bicep / Shoulders 2.0
+    wk[4] = [lower.id];  // Friday    — Posterior / Quads 2.0
+    return { workouts: [glutes, upper, lower], plan: { name: "3 Day Split 2.0", repeat: true, weeks: [wk] } };
+  }
+  // Returns true if S was changed (caller saves).
+  function applyProgramUpdate() {
+    var up = PROGRAM_UPDATES[PROFILE];
+    if (!up || (S.settings.programVersion || 0) >= up.version) return false;
+    var before = EX.length;
+    var p = up.build();
+    saveEx();
+    EX.slice(before).forEach(function (e) { Cloud.putExercise(e); });
+    p.workouts.forEach(function (w) {
+      S.workouts = S.workouts.filter(function (x) { return x.name !== w.name; });
+      S.workouts.push(w);
+    });
+    p.plan.startDate = (S.plan && S.plan.startDate) || todayKey();
+    S.plan = p.plan;
+    S.settings.programVersion = up.version;
+    return true;
   }
 
   /* ---------- Lookups ---------- */
